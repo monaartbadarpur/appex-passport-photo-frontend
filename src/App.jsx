@@ -348,7 +348,7 @@ export default function App() {
       formData.append('file', blob, 'photo.jpg');
       formData.append('mode', processMode);
 
-      const response = await fetch('https://appex-passport-photo-maker.onrender.com//remove-bg', {
+      const response = await fetch('https://appex-passport-photo-maker.onrender.com/remove-bg', {
         method: 'POST',
         body: formData
       });
