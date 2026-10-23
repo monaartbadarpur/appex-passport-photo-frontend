@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import logo from './assets/passport-photo.png';
 
 // A4 canvas and passport-photo dimensions (pixels at the intended print resolution)
@@ -8,6 +8,13 @@ const PHOTO_WIDTH = 390;
 const PHOTO_HEIGHT = 472;
 const MARGIN_LEFT = 60;
 const MARGIN_TOP = 60;
+const COLS = 5;
+const ROWS = 6;
+const GAP_X = 50;
+const GAP_Y = 50;
+const SLOTS_PER_PAGE = COLS * ROWS;
+const DEFAULT_COPIES = 6; // copies pre-selected for each new person
+const MAX_COPIES = 60;
 
 const BRAND_NAME = 'Apex AI Automation';
 const SHOP_TAGLINE = 'Remove background · Smart A4 layout · Just print';
@@ -31,7 +38,10 @@ const ICONS = {
   download: 'M12 4v12m0 0 5-5m-5 5-5-5M4 20h16',
   print: 'M6 9V3h12v6M6 18H4v-7h16v7h-2M7 14h10v7H7z',
   restart: 'M3 12a9 9 0 1 0 3-6.7L3 8m0-5v5h5',
-  check: 'M5 12l5 5 9-10'
+  check: 'M5 12l5 5 9-10',
+  plus: 'M12 5v14M5 12h14',
+  minus: 'M5 12h14',
+  trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'
 };
 
 const Icon = ({ name, size = 18 }) => (
@@ -83,11 +93,75 @@ const Seg = ({ options, value, onChange }) => (
   </div>
 );
 
+const loadImage = (src) =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to load photo'));
+    img.src = src;
+  });
+
+// Turns the people list into a flat list of sheet positions.
+// Each entry is a person id, or null for an empty position.
+const buildSlots = (list, separateRows) => {
+  const slots = [];
+  list.forEach((person) => {
+    if (separateRows) {
+      while (slots.length % COLS !== 0) slots.push(null);
+    }
+    for (let i = 0; i < person.count; i++) slots.push(person.id);
+  });
+  return slots;
+};
+
+// Draws every A4 page and returns them as JPEG data URLs.
+const renderSheets = async (list, separateRows) => {
+  const slots = buildSlots(list, separateRows);
+  if (slots.length === 0) return [];
+
+  const images = {};
+  await Promise.all(
+    list.map(async (person) => {
+      images[person.id] = await loadImage(person.src);
+    })
+  );
+
+  const pages = [];
+  for (let start = 0; start < slots.length; start += SLOTS_PER_PAGE) {
+    const canvas = document.createElement('canvas');
+    canvas.width = A4_WIDTH;
+    canvas.height = A4_HEIGHT;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, A4_WIDTH, A4_HEIGHT);
+
+    slots.slice(start, start + SLOTS_PER_PAGE).forEach((id, i) => {
+      if (!id) return;
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const x = MARGIN_LEFT + col * (PHOTO_WIDTH + GAP_X);
+      const y = MARGIN_TOP + row * (PHOTO_HEIGHT + GAP_Y);
+      ctx.drawImage(images[id], x, y, PHOTO_WIDTH, PHOTO_HEIGHT);
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, PHOTO_WIDTH, PHOTO_HEIGHT);
+    });
+
+    pages.push(canvas.toDataURL('image/jpeg', 0.9));
+  }
+  return pages;
+};
+
 export default function App() {
   const [step, setStep] = useState('upload');
   const [originalImage, setOriginalImage] = useState(null);
   const [fileName, setFileName] = useState('');
-  const [finalA4Sheet, setFinalA4Sheet] = useState(null);
+  const [people, setPeople] = useState([]);
+  const [sheets, setSheets] = useState([]);
+  const [currentPage, setCurrentPage] = useState(0);
+  const [isRendering, setIsRendering] = useState(false);
+  const [separateRows, setSeparateRows] = useState(false);
+  const [personName, setPersonName] = useState('');
   const [processStatus, setProcessStatus] = useState('');
   const [isDropping, setIsDropping] = useState(false);
 
@@ -100,7 +174,7 @@ export default function App() {
   const [brightness, setBrightness] = useState(100);
   const [contrast, setContrast] = useState(100);
   const [bgColor, setBgColor] = useState('#ffffff');
-  const [photoCount, setPhotoCount] = useState(30);
+  const [photoCount, setPhotoCount] = useState(DEFAULT_COPIES);
   const [processMode, setProcessMode] = useState('fast');
 
   const [frame, setFrame] = useState({
@@ -154,7 +228,6 @@ export default function App() {
     reader.onload = (event) => {
       setOriginalImage(event.target.result);
       setFileName(file.name);
-      setFinalA4Sheet(null);
       setProcessStatus('');
       setStep('crop');
     };
@@ -172,19 +245,18 @@ export default function App() {
     processFile(e.dataTransfer.files?.[0]);
   };
 
-  const resetApp = () => {
-    setStep('upload');
+  // Clears the crop editor so the next person starts fresh.
+  // The sheet and the people already added are kept.
+  const prepareNextPerson = () => {
     setOriginalImage(null);
     setFileName('');
-    setFinalA4Sheet(null);
     setProcessStatus('');
+    setPersonName('');
+    setPhotoCount(DEFAULT_COPIES);
     setScale(1);
     setPosition({ x: 0, y: 0 });
     setBrightness(100);
     setContrast(100);
-    setBgColor('#ffffff');
-    setPhotoCount(30);
-    setProcessMode('fast');
     setIsDraggingImage(false);
     setIsDraggingFrame(false);
     setIsResizingFrame(false);
@@ -194,6 +266,31 @@ export default function App() {
       width: INITIAL_FRAME_WIDTH,
       height: Math.round(INITIAL_FRAME_WIDTH / FRAME_RATIO)
     });
+  };
+
+  const resetApp = () => {
+    prepareNextPerson();
+    setPeople([]);
+    setSheets([]);
+    setCurrentPage(0);
+    setBgColor('#ffffff');
+    setProcessMode('fast');
+    setStep('upload');
+  };
+
+  const handleStartOver = () => {
+    if (
+      people.length > 0 &&
+      !window.confirm('Remove all photos from this sheet and start over?')
+    ) {
+      return;
+    }
+    resetApp();
+  };
+
+  const cancelAdd = () => {
+    prepareNextPerson();
+    setStep(people.length > 0 ? 'people' : 'upload');
   };
 
   const centerImageManually = () => {
@@ -396,74 +493,127 @@ export default function App() {
       finalPhotoSrc = croppedSrc;
     }
 
-    try {
-      setProcessStatus('Generating print sheet...');
-      const a4Src = await generateA4Sheet(finalPhotoSrc);
-      setFinalA4Sheet(a4Src);
-      setStep('result');
-    } catch (err) {
-      console.error('Sheet generation failed:', err);
-      alert('Failed to generate print sheet.');
-      setStep('crop');
-    }
+    setProcessStatus('Adding to sheet...');
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setPeople((prev) => [
+      ...prev,
+      {
+        id,
+        name: personName.trim() || `Person ${prev.length + 1}`,
+        src: finalPhotoSrc,
+        count: photoCount
+      }
+    ]);
+    prepareNextPerson();
+    setStep('people');
   };
 
-  const generateA4Sheet = (photoSrc) =>
-    new Promise((resolve, reject) => {
-      const canvas = document.createElement('canvas');
-      canvas.width = A4_WIDTH;
-      canvas.height = A4_HEIGHT;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, A4_WIDTH, A4_HEIGHT);
+  const updatePerson = (id, patch) =>
+    setPeople((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, ...patch } : p))
+    );
 
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        const cols = 5;
-        const rows = 6;
-        const gapX = 50;
-        const gapY = 50;
-        let drawnCount = 0;
+  const changeCount = (id, delta) =>
+    setPeople((prev) =>
+      prev.map((p) =>
+        p.id === id
+          ? { ...p, count: clamp(p.count + delta, 1, MAX_COPIES) }
+          : p
+      )
+    );
 
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            if (drawnCount >= photoCount) break;
-            const x = MARGIN_LEFT + c * (PHOTO_WIDTH + gapX);
-            const y = MARGIN_TOP + r * (PHOTO_HEIGHT + gapY);
-            ctx.drawImage(img, x, y, PHOTO_WIDTH, PHOTO_HEIGHT);
-            ctx.strokeStyle = '#000000';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(x, y, PHOTO_WIDTH, PHOTO_HEIGHT);
-            drawnCount++;
-          }
-        }
-        resolve(canvas.toDataURL('image/jpeg', 0.9));
-      };
-      img.onerror = () => reject(new Error('Failed to load processed image'));
-      img.src = photoSrc;
-    });
+  const removePerson = (id) => {
+    if (people.length <= 1) {
+      setPeople([]);
+      setSheets([]);
+      setCurrentPage(0);
+      setStep('upload');
+      return;
+    }
+    setPeople((prev) => prev.filter((p) => p.id !== id));
+  };
 
-  const handleDownload = () => {
-    if (!finalA4Sheet) return;
-    fetch(finalA4Sheet)
+  const totalPhotos = people.reduce((sum, p) => sum + p.count, 0);
+  const slotCount = buildSlots(people, separateRows).length;
+  const pageCount = Math.ceil(slotCount / SLOTS_PER_PAGE);
+  const spareSlots = pageCount * SLOTS_PER_PAGE - slotCount;
+
+  // Redraw the A4 pages whenever the people list or layout option changes
+  useEffect(() => {
+    if (step !== 'people') return undefined;
+    let cancelled = false;
+    setIsRendering(true);
+    const timer = setTimeout(() => {
+      renderSheets(people, separateRows)
+        .then((pages) => {
+          if (cancelled) return;
+          setSheets(pages);
+          setCurrentPage((page) =>
+            Math.min(page, Math.max(pages.length - 1, 0))
+          );
+          setIsRendering(false);
+        })
+        .catch((err) => {
+          console.error('Sheet generation failed:', err);
+          if (cancelled) return;
+          setIsRendering(false);
+          alert('Failed to generate print sheet.');
+        });
+    }, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [people, separateRows, step]);
+
+  const saveDataUrl = (dataUrl, filename) =>
+    fetch(dataUrl)
       .then((res) => res.blob())
       .then((blob) => {
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `Apex_AI_Automation_Passport_Sheet_${Date.now()}.jpg`;
+        link.download = filename;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
         window.URL.revokeObjectURL(url);
       })
       .catch((err) => console.error('Download failed:', err));
+
+  const handleDownload = () => {
+    if (!sheets[currentPage]) return;
+    saveDataUrl(
+      sheets[currentPage],
+      `Apex_AI_Automation_Passport_Sheet_${Date.now()}_page${currentPage + 1}.jpg`
+    );
+  };
+
+  const handleDownloadAll = async () => {
+    const stamp = Date.now();
+    for (let i = 0; i < sheets.length; i++) {
+      await saveDataUrl(
+        sheets[i],
+        `Apex_AI_Automation_Passport_Sheet_${stamp}_page${i + 1}.jpg`
+      );
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
   };
 
   const handlePrint = () => {
+    if (sheets.length === 0) return;
     const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
+    if (!printWindow) {
+      alert('Please allow pop-ups for this site, then press Print again.');
+      return;
+    }
+
+    const pagesHtml = sheets
+      .map(
+        (src) =>
+          `<div class="wrapper"><img src="${src}" class="print-image" /></div>`
+      )
+      .join('');
 
     printWindow.document.write(`
       <html>
@@ -471,25 +621,31 @@ export default function App() {
           <title>Print Passport Photos</title>
           <style>
             @page { size: A4; margin: 0; }
-            html, body { margin: 0; padding: 0; width: 210mm; height: 297mm; background: white; }
-            .wrapper { position: relative; width: 210mm; height: 297mm; background: white; }
+            html, body { margin: 0; padding: 0; background: white; }
+            .wrapper { position: relative; width: 210mm; height: 297mm; background: white; overflow: hidden; page-break-after: always; }
+            .wrapper:last-child { page-break-after: auto; }
             .print-image { position: absolute; top: .5mm; left: .5mm; width: 204mm; height: auto; }
           </style>
         </head>
         <body onload="window.print(); window.close();">
-          <div class="wrapper"><img src="${finalA4Sheet}" class="print-image" /></div>
+          ${pagesHtml}
         </body>
       </html>
     `);
     printWindow.document.close();
   };
 
-  const stepIndex = { upload: 0, crop: 1, process: 2, result: 3 }[step];
+  const stepIndex = { upload: 0, crop: 1, process: 2, people: 3 }[step];
   const railSteps = [
     ['Upload photo', fileName || 'Choose a customer photo'],
     ['Crop and adjust', 'Frame the face'],
     ['Remove background', processMode === 'hd' ? 'HD quality' : 'Fast quality'],
-    ['Print sheet', `A4 | ${photoCount} photos`]
+    [
+      'Print sheet',
+      people.length > 0
+        ? `${totalPhotos} photos | ${pageCount} ${pageCount === 1 ? 'page' : 'pages'}`
+        : 'A4 sheet'
+    ]
   ];
 
   return (
@@ -501,6 +657,14 @@ export default function App() {
         #root{max-width:none!important;margin:0!important;padding:0!important;text-align:left!important;width:100%!important}
         body{display:block!important;margin:0!important;min-width:0!important}
       `}</style>
+
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileUpload}
+        accept="image/jpeg,image/png"
+        className="hidden"
+      />
 
       {/* Redesigned header */}
       <header className="min-h-[88px] shrink-0 bg-gradient-to-r from-[#F8FAFC] to-[#B8E6E2] flex flex-wrap items-center justify-between gap-4 px-5 sm:px-8 lg:px-12 py-4">
@@ -533,7 +697,7 @@ export default function App() {
           </button>
           {step !== 'upload' && (
             <button
-              onClick={resetApp}
+              onClick={handleStartOver}
               className="flex items-center gap-2 rounded-xl border border-[#9AAFC0] px-4 py-3 hover:bg-white/60"
             >
               <Icon name="restart" size={14} /> Start over
@@ -691,13 +855,6 @@ export default function App() {
                             Choose Photo
                           </button>
                           <p className="mt-4 text-xs text-[#687789]">JPG or PNG · Maximum 10 MB</p>
-                          <input
-                            type="file"
-                            ref={fileInputRef}
-                            onChange={handleFileUpload}
-                            accept="image/jpeg,image/png"
-                            className="hidden"
-                          />
                         </div>
                       </div>
                     </div>
@@ -773,6 +930,19 @@ export default function App() {
 
               <div className="w-full lg:w-[400px] shrink-0 bg-white border-t lg:border-t-0 lg:border-l border-[#E1E6F0] p-6 space-y-6 lg:overflow-y-auto lg:max-h-[calc(100vh-112px)]">
                 <div className="space-y-2">
+                  <label htmlFor="person-name" className="text-sm font-semibold">Name (optional)</label>
+                  <input
+                    id="person-name"
+                    type="text"
+                    value={personName}
+                    onChange={(e) => setPersonName(e.target.value)}
+                    placeholder={`Person ${people.length + 1}`}
+                    className="w-full rounded-xl border border-[#C5CEE0] px-4 py-2.5 text-sm outline-none focus:border-[#2457D6]"
+                  />
+                  <p className="text-xs text-[#6B7794]">Helps you tell people apart in the list. It is not printed.</p>
+                </div>
+
+                <div className="space-y-2">
                   <p className="text-sm font-semibold">Removal quality</p>
                   <Seg options={[['fast', 'Fast'], ['hd', 'HD']]} value={processMode} onChange={setProcessMode} />
                   <p className="text-xs text-[#6B7794]">HD gives cleaner hair edges but takes longer.</p>
@@ -796,11 +966,20 @@ export default function App() {
                 <Slider label="Zoom" display={`${Math.round(scale * 100)}%`} min="0.1" max="5" step="0.01" value={scale} onChange={(e) => setScale(parseFloat(e.target.value))} />
                 <Slider label="Brightness" display={`${brightness}%`} min="50" max="150" step="1" value={brightness} onChange={(e) => setBrightness(parseInt(e.target.value, 10))} />
                 <Slider label="Contrast" display={`${contrast}%`} min="50" max="150" step="1" value={contrast} onChange={(e) => setContrast(parseInt(e.target.value, 10))} />
-                <Slider label="Photos on sheet" display={photoCount} min="1" max="30" step="1" value={photoCount} onChange={(e) => setPhotoCount(parseInt(e.target.value, 10))} />
+                <Slider label="Copies of this person" display={photoCount} min="1" max="30" step="1" value={photoCount} onChange={(e) => setPhotoCount(parseInt(e.target.value, 10))} />
 
                 <button onClick={confirmCrop} className="w-full h-14 rounded-2xl bg-[#F2A93B] text-[#0F1B3D] text-lg font-bold hover:bg-[#E89B26] active:scale-[0.99] transition">
-                  Make print sheet
+                  {people.length > 0 ? 'Add to sheet' : 'Make print sheet'}
                 </button>
+                {people.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={cancelAdd}
+                    className="w-full h-12 rounded-2xl bg-[#E8F1F2] text-[#1B2440] font-semibold hover:bg-[#D8E7E9] transition"
+                  >
+                    Cancel and go back to the sheet
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -816,38 +995,189 @@ export default function App() {
             </div>
           )}
 
-          {/* Result and printing screen */}
-          {step === 'result' && (
+          {/* People and print screen */}
+          {step === 'people' && (
             <div className="flex-1 flex flex-col lg:flex-row min-w-0 bg-gradient-to-br from-[#F7FAFC] to-[#E4F4F2]">
               <div className="flex-1 min-w-0 p-6 lg:p-10 overflow-auto flex flex-col items-center">
-                <div className="text-center mb-5">
+                <div className="text-center mb-4">
                   <h2 className="text-2xl font-bold">Print preview</h2>
-                  <p className="text-[#6B7794]">A4 sheet, {photoCount} photos, ready to print.</p>
+                  <p className="text-[#6B7794]">
+                    A4 sheet: {totalPhotos} photos of {people.length}{' '}
+                    {people.length === 1 ? 'person' : 'people'} on {pageCount}{' '}
+                    {pageCount === 1 ? 'page' : 'pages'}.
+                  </p>
                 </div>
-                <img
-                  src={finalA4Sheet}
-                  alt="A4 sheet preview"
-                  className="max-h-[calc(100vh-260px)] w-auto max-w-full bg-white border border-[#D5DCEA] shadow-2xl"
-                />
+
+                {sheets.length > 1 && (
+                  <div className="mb-4 flex flex-wrap justify-center gap-2">
+                    {sheets.map((_, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setCurrentPage(i)}
+                        className={`h-9 rounded-lg px-4 text-sm font-semibold transition ${
+                          currentPage === i
+                            ? 'bg-[#2457D6] text-white'
+                            : 'border border-[#D5DCEA] bg-white text-[#51607F] hover:bg-[#EEF2F9]'
+                        }`}
+                      >
+                        Page {i + 1}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="relative">
+                  {sheets[currentPage] ? (
+                    <img
+                      src={sheets[currentPage]}
+                      alt={`A4 sheet preview, page ${currentPage + 1}`}
+                      className="max-h-[calc(100vh-300px)] min-h-[320px] w-auto max-w-full bg-white border border-[#D5DCEA] shadow-2xl"
+                    />
+                  ) : (
+                    <div className="flex h-[420px] w-[300px] items-center justify-center bg-white border border-[#D5DCEA] text-sm text-[#6B7794] shadow-2xl">
+                      Preparing sheet...
+                    </div>
+                  )}
+                  {isRendering && sheets[currentPage] && (
+                    <div className="absolute right-3 top-3 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-[#2457D6] shadow">
+                      Updating...
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <div className="w-full lg:w-[380px] shrink-0 bg-white/90 border-t lg:border-t-0 lg:border-l border-[#D8E3E7] p-6 space-y-4">
-                <h3 className="text-lg font-semibold">Print station</h3>
-                <button onClick={handlePrint} className="w-full h-14 rounded-2xl bg-[#2457D6] text-white font-semibold flex items-center justify-center gap-2 hover:bg-[#1D47B0] transition">
-                  <Icon name="print" /> Print sheet
+              <div className="w-full lg:w-[420px] shrink-0 bg-white/90 border-t lg:border-t-0 lg:border-l border-[#D8E3E7] p-6 flex flex-col gap-4 lg:h-[calc(100vh-112px)]">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold">People on this sheet</h3>
+                  <span className="rounded-full bg-[#EAF0FF] px-3 py-1 text-sm font-semibold text-[#2457D6]">{people.length}</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full h-12 shrink-0 rounded-2xl bg-[#F2A93B] text-[#0F1B3D] font-bold flex items-center justify-center gap-2 hover:bg-[#E89B26] transition"
+                >
+                  <Icon name="plus" /> Add another person
                 </button>
-                <button onClick={handleDownload} className="w-full h-14 rounded-2xl bg-[#102D50] text-white font-semibold flex items-center justify-center gap-2 hover:bg-black transition">
-                  <Icon name="download" /> Download JPEG
-                </button>
-                <button onClick={resetApp} className="w-full h-14 rounded-2xl bg-[#E8F1F2] text-[#1B2440] font-semibold hover:bg-[#D8E7E9] transition">
-                  New customer photo
-                </button>
-                <div className="pt-4 border-t border-[#E1E6F0] text-sm text-[#6B7794] space-y-2">
-                  <div className="flex justify-between"><span>Photos</span><span className="font-medium text-[#1B2440]">{photoCount}</span></div>
+
+                <div className="space-y-3 overflow-y-auto max-h-[50vh] lg:max-h-none lg:flex-1 lg:min-h-0 pr-1">
+                  {people.map((p, i) => (
+                    <div key={p.id} className="flex items-center gap-3 rounded-xl border border-[#E1E6F0] bg-white p-3">
+                      <img
+                        src={p.src}
+                        alt={p.name}
+                        className="h-16 w-[53px] shrink-0 rounded-md border border-[#D5DCEA] object-cover"
+                      />
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <input
+                          type="text"
+                          value={p.name}
+                          onChange={(e) => updatePerson(p.id, { name: e.target.value })}
+                          aria-label={`Name for person ${i + 1}`}
+                          className="w-full rounded-lg border border-[#D5DCEA] px-3 py-1.5 text-sm font-medium outline-none focus:border-[#2457D6]"
+                        />
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => changeCount(p.id, -1)}
+                            disabled={p.count <= 1}
+                            aria-label={`Fewer copies of ${p.name}`}
+                            className="h-8 w-8 rounded-lg bg-[#EEF2F9] text-[#1B2440] flex items-center justify-center hover:bg-[#DDE5F4] disabled:opacity-40"
+                          >
+                            <Icon name="minus" size={14} />
+                          </button>
+                          <input
+                            type="number"
+                            min="1"
+                            max={MAX_COPIES}
+                            value={p.count}
+                            onChange={(e) => {
+                              const v = parseInt(e.target.value, 10);
+                              updatePerson(p.id, {
+                                count: Number.isNaN(v) ? 1 : clamp(v, 1, MAX_COPIES)
+                              });
+                            }}
+                            aria-label={`Copies of ${p.name}`}
+                            className="h-8 w-14 rounded-lg border border-[#D5DCEA] text-center text-sm font-semibold outline-none focus:border-[#2457D6]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => changeCount(p.id, 1)}
+                            disabled={p.count >= MAX_COPIES}
+                            aria-label={`More copies of ${p.name}`}
+                            className="h-8 w-8 rounded-lg bg-[#EEF2F9] text-[#1B2440] flex items-center justify-center hover:bg-[#DDE5F4] disabled:opacity-40"
+                          >
+                            <Icon name="plus" size={14} />
+                          </button>
+                          <span className="text-xs text-[#6B7794]">copies</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removePerson(p.id)}
+                        aria-label={`Remove ${p.name}`}
+                        title="Remove this person"
+                        className="h-9 w-9 shrink-0 rounded-lg text-[#B42318] flex items-center justify-center hover:bg-[#FDECEA]"
+                      >
+                        <Icon name="trash" size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <label className="flex shrink-0 cursor-pointer items-start gap-3 text-sm text-[#3C4766]">
+                  <input
+                    type="checkbox"
+                    checked={separateRows}
+                    onChange={(e) => setSeparateRows(e.target.checked)}
+                    className="mt-1 h-4 w-4 accent-[#2457D6]"
+                  />
+                  <span>
+                    Start each person on a new row
+                    <span className="block text-xs text-[#6B7794]">Easier to cut and hand out, but uses more space.</span>
+                  </span>
+                </label>
+
+                <div className="shrink-0 space-y-1 border-t border-[#E1E6F0] pt-3 text-sm text-[#6B7794]">
+                  <div className="flex justify-between"><span>Total photos</span><span className="font-medium text-[#1B2440]">{totalPhotos}</span></div>
+                  <div className="flex justify-between"><span>Free spaces on last page</span><span className="font-medium text-[#1B2440]">{spareSlots}</span></div>
                   <div className="flex justify-between"><span>Paper</span><span className="font-medium text-[#1B2440]">A4, 300 DPI canvas</span></div>
                   <div className="flex justify-between"><span>Cutting lines</span><span className="font-medium text-[#1B2440]">Included</span></div>
                 </div>
-                <p className="text-xs text-[#6B7794]">{BRAND_NAME}</p>
+
+                <div className="shrink-0 space-y-2">
+                  <button
+                    onClick={handlePrint}
+                    disabled={sheets.length === 0}
+                    className="w-full h-12 rounded-2xl bg-[#2457D6] text-white font-semibold flex items-center justify-center gap-2 hover:bg-[#1D47B0] transition disabled:opacity-50"
+                  >
+                    <Icon name="print" /> {pageCount > 1 ? `Print all ${pageCount} pages` : 'Print sheet'}
+                  </button>
+                  <button
+                    onClick={handleDownload}
+                    disabled={sheets.length === 0}
+                    className="w-full h-12 rounded-2xl bg-[#102D50] text-white font-semibold flex items-center justify-center gap-2 hover:bg-black transition disabled:opacity-50"
+                  >
+                    <Icon name="download" /> {pageCount > 1 ? `Download page ${currentPage + 1}` : 'Download JPEG'}
+                  </button>
+                  {pageCount > 1 && (
+                    <button
+                      onClick={handleDownloadAll}
+                      disabled={sheets.length === 0}
+                      className="w-full h-12 rounded-2xl bg-[#102D50] text-white font-semibold flex items-center justify-center gap-2 hover:bg-black transition disabled:opacity-50"
+                    >
+                      <Icon name="download" /> Download all pages
+                    </button>
+                  )}
+                  <button
+                    onClick={handleStartOver}
+                    className="w-full h-12 rounded-2xl bg-[#E8F1F2] text-[#1B2440] font-semibold hover:bg-[#D8E7E9] transition"
+                  >
+                    Clear sheet and start new
+                  </button>
+                </div>
+                <p className="shrink-0 text-xs text-[#6B7794]">{BRAND_NAME}</p>
               </div>
             </div>
           )}
