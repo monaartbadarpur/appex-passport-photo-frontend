@@ -8,11 +8,47 @@ const PHOTO_WIDTH = 390;
 const PHOTO_HEIGHT = 472;
 const MARGIN_LEFT = 60;
 const MARGIN_TOP = 60;
-const COLS = 5;
-const ROWS = 6;
-const GAP_X = 50;
-const GAP_Y = 50;
-const SLOTS_PER_PAGE = COLS * ROWS;
+
+// Sheet sizes. Pixel sizes use the same scale as the full A4 sheet (300 DPI canvas).
+// Half A4 is A4 cut in the middle along the long side: 105 x 297 mm.
+const PAPERS = {
+  a4: {
+    label: 'Full A4',
+    summary: 'A4, 300 DPI canvas',
+    width: A4_WIDTH,
+    height: A4_HEIGHT,
+    cols: 5,
+    rows: 6,
+    photoW: PHOTO_WIDTH,
+    photoH: PHOTO_HEIGHT,
+    marginX: MARGIN_LEFT,
+    marginY: MARGIN_TOP,
+    gapX: 50,
+    gapY: 50,
+    pageCss: 'A4',
+    pageWmm: 210,
+    pageHmm: 297,
+    imgWmm: 204
+  },
+  half: {
+    label: 'Half A4',
+    summary: 'Half A4 (105 x 297 mm), 3 across',
+    width: A4_WIDTH / 2,
+    height: A4_HEIGHT,
+    cols: 3,
+    rows: 7,
+    photoW: 376,
+    photoH: 455,
+    marginX: 41,
+    marginY: 40,
+    gapX: 15,
+    gapY: 20,
+    pageCss: '105mm 297mm',
+    pageWmm: 105,
+    pageHmm: 297,
+    imgWmm: 102
+  }
+};
 const DEFAULT_COPIES = 6; // copies pre-selected for each new person
 const MAX_COPIES = 60;
 
@@ -103,20 +139,21 @@ const loadImage = (src) =>
 
 // Turns the people list into a flat list of sheet positions.
 // Each entry is a person id, or null for an empty position.
-const buildSlots = (list, separateRows) => {
+const buildSlots = (list, separateRows, cols) => {
   const slots = [];
   list.forEach((person) => {
     if (separateRows) {
-      while (slots.length % COLS !== 0) slots.push(null);
+      while (slots.length % cols !== 0) slots.push(null);
     }
     for (let i = 0; i < person.count; i++) slots.push(person.id);
   });
   return slots;
 };
 
-// Draws every A4 page and returns them as JPEG data URLs.
-const renderSheets = async (list, separateRows) => {
-  const slots = buildSlots(list, separateRows);
+// Draws every page of the chosen paper size and returns them as JPEG data URLs.
+const renderSheets = async (list, separateRows, paper) => {
+  const perPage = paper.cols * paper.rows;
+  const slots = buildSlots(list, separateRows, paper.cols);
   if (slots.length === 0) return [];
 
   const images = {};
@@ -127,24 +164,24 @@ const renderSheets = async (list, separateRows) => {
   );
 
   const pages = [];
-  for (let start = 0; start < slots.length; start += SLOTS_PER_PAGE) {
+  for (let start = 0; start < slots.length; start += perPage) {
     const canvas = document.createElement('canvas');
-    canvas.width = A4_WIDTH;
-    canvas.height = A4_HEIGHT;
+    canvas.width = paper.width;
+    canvas.height = paper.height;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, A4_WIDTH, A4_HEIGHT);
+    ctx.fillRect(0, 0, paper.width, paper.height);
 
-    slots.slice(start, start + SLOTS_PER_PAGE).forEach((id, i) => {
+    slots.slice(start, start + perPage).forEach((id, i) => {
       if (!id) return;
-      const col = i % COLS;
-      const row = Math.floor(i / COLS);
-      const x = MARGIN_LEFT + col * (PHOTO_WIDTH + GAP_X);
-      const y = MARGIN_TOP + row * (PHOTO_HEIGHT + GAP_Y);
-      ctx.drawImage(images[id], x, y, PHOTO_WIDTH, PHOTO_HEIGHT);
+      const col = i % paper.cols;
+      const row = Math.floor(i / paper.cols);
+      const x = paper.marginX + col * (paper.photoW + paper.gapX);
+      const y = paper.marginY + row * (paper.photoH + paper.gapY);
+      ctx.drawImage(images[id], x, y, paper.photoW, paper.photoH);
       ctx.strokeStyle = '#000000';
       ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, PHOTO_WIDTH, PHOTO_HEIGHT);
+      ctx.strokeRect(x, y, paper.photoW, paper.photoH);
     });
 
     pages.push(canvas.toDataURL('image/jpeg', 0.9));
@@ -161,6 +198,7 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(0);
   const [isRendering, setIsRendering] = useState(false);
   const [separateRows, setSeparateRows] = useState(false);
+  const [paperSize, setPaperSize] = useState('a4');
   const [personName, setPersonName] = useState('');
   const [processStatus, setProcessStatus] = useState('');
   const [isDropping, setIsDropping] = useState(false);
@@ -534,9 +572,11 @@ export default function App() {
   };
 
   const totalPhotos = people.reduce((sum, p) => sum + p.count, 0);
-  const slotCount = buildSlots(people, separateRows).length;
-  const pageCount = Math.ceil(slotCount / SLOTS_PER_PAGE);
-  const spareSlots = pageCount * SLOTS_PER_PAGE - slotCount;
+  const paper = PAPERS[paperSize];
+  const slotsPerPage = paper.cols * paper.rows;
+  const slotCount = buildSlots(people, separateRows, paper.cols).length;
+  const pageCount = Math.ceil(slotCount / slotsPerPage);
+  const spareSlots = pageCount * slotsPerPage - slotCount;
 
   // Redraw the A4 pages whenever the people list or layout option changes
   useEffect(() => {
@@ -544,7 +584,7 @@ export default function App() {
     let cancelled = false;
     setIsRendering(true);
     const timer = setTimeout(() => {
-      renderSheets(people, separateRows)
+      renderSheets(people, separateRows, PAPERS[paperSize])
         .then((pages) => {
           if (cancelled) return;
           setSheets(pages);
@@ -564,7 +604,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [people, separateRows, step]);
+  }, [people, separateRows, paperSize, step]);
 
   const saveDataUrl = (dataUrl, filename) =>
     fetch(dataUrl)
@@ -620,11 +660,11 @@ export default function App() {
         <head>
           <title>Print Passport Photos</title>
           <style>
-            @page { size: A4; margin: 0; }
+            @page { size: ${paper.pageCss}; margin: 0; }
             html, body { margin: 0; padding: 0; background: white; }
-            .wrapper { position: relative; width: 210mm; height: 297mm; background: white; overflow: hidden; page-break-after: always; }
+            .wrapper { position: relative; width: ${paper.pageWmm}mm; height: ${paper.pageHmm}mm; background: white; overflow: hidden; page-break-after: always; }
             .wrapper:last-child { page-break-after: auto; }
-            .print-image { position: absolute; top: .5mm; left: .5mm; width: 204mm; height: auto; }
+            .print-image { position: absolute; top: .5mm; left: .5mm; width: ${paper.imgWmm}mm; height: auto; }
           </style>
         </head>
         <body onload="window.print(); window.close();">
@@ -1002,7 +1042,7 @@ export default function App() {
                 <div className="text-center mb-4">
                   <h2 className="text-2xl font-bold">Print preview</h2>
                   <p className="text-[#6B7794]">
-                    A4 sheet: {totalPhotos} photos of {people.length}{' '}
+                    {paper.label} sheet: {totalPhotos} photos of {people.length}{' '}
                     {people.length === 1 ? 'person' : 'people'} on {pageCount}{' '}
                     {pageCount === 1 ? 'page' : 'pages'}.
                   </p>
@@ -1051,6 +1091,20 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <h3 className="text-lg font-semibold">People on this sheet</h3>
                   <span className="rounded-full bg-[#EAF0FF] px-3 py-1 text-sm font-semibold text-[#2457D6]">{people.length}</span>
+                </div>
+
+                <div className="shrink-0 space-y-2">
+                  <p className="text-sm font-semibold">Paper size</p>
+                  <Seg
+                    options={[['a4', 'Full A4'], ['half', 'Half A4']]}
+                    value={paperSize}
+                    onChange={setPaperSize}
+                  />
+                  {paperSize === 'half' && (
+                    <p className="text-xs text-[#6B7794]">
+                      Cut A4 in the middle along the long side (105 x 297 mm) and load one half. Set the printer paper size to match, with margins off and scale at 100%.
+                    </p>
+                  )}
                 </div>
 
                 <button
@@ -1142,7 +1196,7 @@ export default function App() {
                 <div className="shrink-0 space-y-1 border-t border-[#E1E6F0] pt-3 text-sm text-[#6B7794]">
                   <div className="flex justify-between"><span>Total photos</span><span className="font-medium text-[#1B2440]">{totalPhotos}</span></div>
                   <div className="flex justify-between"><span>Free spaces on last page</span><span className="font-medium text-[#1B2440]">{spareSlots}</span></div>
-                  <div className="flex justify-between"><span>Paper</span><span className="font-medium text-[#1B2440]">A4, 300 DPI canvas</span></div>
+                  <div className="flex justify-between"><span>Paper</span><span className="font-medium text-[#1B2440]">{paper.summary}</span></div>
                   <div className="flex justify-between"><span>Cutting lines</span><span className="font-medium text-[#1B2440]">Included</span></div>
                 </div>
 
