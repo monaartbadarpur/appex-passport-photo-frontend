@@ -11,6 +11,8 @@ const MARGIN_TOP = 60;
 
 // Sheet sizes. Pixel sizes use the same scale as the full A4 sheet (300 DPI canvas).
 // Half A4 is A4 cut in the middle along the long side: 105 x 297 mm.
+// It is printed on an A4 page with the photos on the left half, so the print dialog
+// does not centre it.
 const PAPERS = {
   a4: {
     label: 'Full A4',
@@ -43,8 +45,8 @@ const PAPERS = {
     marginY: 40,
     gapX: 15,
     gapY: 20,
-    pageCss: '105mm 297mm',
-    pageWmm: 105,
+    pageCss: 'A4',
+    pageWmm: 210,
     pageHmm: 297,
     imgWmm: 102
   }
@@ -1102,7 +1104,7 @@ export default function App() {
                   />
                   {paperSize === 'half' && (
                     <p className="text-xs text-[#6B7794]">
-                      Cut A4 in the middle along the long side (105 x 297 mm) and load one half. Set the printer paper size to match, with margins off and scale at 100%.
+                      Photos print on the left half of an A4 page. Load the cut half sheet against the left edge, keep paper size A4, margins None and scale 100%.
                     </p>
                   )}
                 </div>
